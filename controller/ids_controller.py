@@ -6,6 +6,7 @@ from ryu.ofproto import ofproto_v1_3
 from ryu.lib.packet import packet
 from ryu.lib.packet import ethernet
 from ryu.lib.packet import ether_types
+from ryu.lib import hub
 
 
 class TimetableIDS(app_manager.RyuApp):
@@ -14,10 +15,44 @@ class TimetableIDS(app_manager.RyuApp):
     def __init__(self, *args, **kwargs):
         super(TimetableIDS, self).__init__(*args, **kwargs)
         self.mac_to_port = {}
+        # remember every switch that connects, so we can poll it
+        self.datapaths = {}
+        # start the background monitoring loop
+        self.monitor_thread = hub.spawn(self._monitor)
 
+    # ---------- monitoring loop ----------
+    def _monitor(self):
+        # runs forever: every 5 seconds, ask each switch for its stats
+        while True:
+            for dp in list(self.datapaths.values()):
+                self._request_stats(dp)
+            hub.sleep(5)
+
+    def _request_stats(self, datapath):
+        parser = datapath.ofproto_parser
+        # ask this switch for its per-port counters
+        req = parser.OFPPortStatsRequest(datapath, 0,
+                                         datapath.ofproto.OFPP_ANY)
+        datapath.send_msg(req)
+
+    @set_ev_cls(ofp_event.EventOFPPortStatsReply, MAIN_DISPATCHER)
+    def _port_stats_reply_handler(self, ev):
+        # runs each time a switch answers with its stats
+        dpid = ev.msg.datapath.id
+        for stat in ev.msg.body:
+            self.logger.info("STATS switch=%s port=%s rx_pkts=%s tx_pkts=%s "
+                             "rx_bytes=%s tx_bytes=%s",
+                             dpid, stat.port_no,
+                             stat.rx_packets, stat.tx_packets,
+                             stat.rx_bytes, stat.tx_bytes)
+
+    # ---------- base switch logic ----------
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
         datapath = ev.msg.datapath
+        # remember this switch so the monitor loop can poll it
+        self.datapaths[datapath.id] = datapath
+
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
         match = parser.OFPMatch()
@@ -51,10 +86,6 @@ class TimetableIDS(app_manager.RyuApp):
         src = eth.src
         dpid = datapath.id
         self.mac_to_port.setdefault(dpid, {})
-
-        self.logger.info("packet in dpid=%s src=%s dst=%s port=%s",
-                         dpid, src, dst, in_port)
-
         self.mac_to_port[dpid][src] = in_port
 
         if dst in self.mac_to_port[dpid]:
