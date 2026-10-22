@@ -1,4 +1,4 @@
 room,start,end,expected_active
-1,00:00,23:59,yes
 2,00:00,23:59,yes
 3,00:00,23:59,no
+9,00:00,23:59,no
